@@ -1,0 +1,29 @@
+# PriceAnalyzer – Site Yapılandırma Dosyası
+#
+# Format (pipe | ile ayrılmış 4 alan):
+#   SiteAdı | AramaURLŞablonu | FiyatCSSSeçici | StokCSSSeçici
+#
+# Kurallar:
+#   - {code} yer tutucusu ürün koduyla değiştirilir
+#   - # ile başlayan satırlar yorum satırıdır
+#   - Boş satırlar atlanır
+#   - CSS seçiciler, BeautifulSoup'un select_one() metoduyla kullanılır
+#
+# ──────────────────────────────────────────────────────────────────
+# Örnek Yapılandırmalar (Kendi sitelerinize göre düzenleyin)
+# ──────────────────────────────────────────────────────────────────
+
+# Örnek 1: Basit arama sayfası
+# Tedarikci1 | https://www.tedarikci1.com/ara?q={code} | .price | .stock-status
+
+# Örnek 2: Doğrudan ürün sayfası
+# Tedarikci2 | https://www.tedarikci2.com/product/{code} | #product-price | #availability
+
+# Örnek 3: Birden fazla seçici (virgülle ayrılmış – ilk bulunan kullanılır)
+# Tedarikci3 | https://www.tedarikci3.com/search/{code} | span.price,div.fiyat | span.stok,div.stock
+
+# ──────────────────────────────────────────────────────────────────
+# Aktif site yapılandırmalarınızı buraya ekleyin:
+# ──────────────────────────────────────────────────────────────────
+
+# SiteAdı | URL Şablonu                                    | Fiyat Seçici       | Stok Seçici
