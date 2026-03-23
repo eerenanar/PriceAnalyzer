@@ -15,6 +15,8 @@ class FilesConfig:
 @dataclass
 class ExcelConfig:
     product_column: str = "A"
+    offer1_column: str = "B"
+    offer2_column: str = "C"
     header_row: int = 1
     start_row: int = 2
 
@@ -61,6 +63,8 @@ def load_config(config_path: str = "config.ini") -> AppConfig:
     if parser.has_section("excel"):
         s = parser["excel"]
         cfg.excel.product_column = s.get("product_column", cfg.excel.product_column).strip().upper()
+        cfg.excel.offer1_column = s.get("offer1_column", cfg.excel.offer1_column).strip().upper()
+        cfg.excel.offer2_column = s.get("offer2_column", cfg.excel.offer2_column).strip().upper()
         cfg.excel.header_row = s.getint("header_row", cfg.excel.header_row)
         cfg.excel.start_row = s.getint("start_row", cfg.excel.start_row)
 

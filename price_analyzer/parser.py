@@ -16,16 +16,20 @@ CURRENCY_PATTERNS = [
 
 # Sayısal fiyat regex'i: 1.234,56 veya 1,234.56 veya 1234.56 biçimlerini destekler
 PRICE_REGEX = re.compile(
-    r"(?:[\$€£₺]?\s*)"            # İsteğe bağlı sembol önde
-    r"(\d{1,3}(?:[.,]\d{3})*"     # Binlik ayırıcılı sayı
-    r"(?:[.,]\d{1,2})?|\d+)"      # Ondalık kısım
-    r"(?:\s*(?:TL|TRY|USD|EUR|GBP|₺|\$|€|£))?",  # İsteğe bağlı birim sonda
+    r"(?:[\$€£₺]?\s*)"
+    r"(\d{1,3}(?:,\d{3})+\.\d+"        # 1,234.5678  İngilizce binlik+ondalık
+    r"|\d{1,3}(?:\.\d{3})+,\d+"        # 1.234,56    Türkçe binlik+ondalık
+    r"|\d{1,3}(?:,\d{3}){2,}"          # 1,234,567   İngilizce binlik tam sayı (2+ grup)
+    r"|\d+\.\d+"                        # 0.0028 / 0.10000 / 1.5 — noktalı ondalık
+    r"|\d+,\d+"                         # 0,0143 / 1,5 — virgüllü ondalık
+    r"|\d+)"                            # 100 — tam sayı
+    r"(?:\s*(?:TL|TRY|USD|EUR|GBP|₺|\$|€|£))?",
     re.IGNORECASE,
 )
 
 # Stok miktarı regex'i
 STOCK_REGEX = re.compile(
-    r"(\d+)\s*(?:adet|pcs?|piece|stok|stock|qty|quantity|unit|birim)?",
+    r"(\d[\d.,]*\d|\d)\s*(?:adet|pcs?|piece|stok|stock|qty|quantity|unit|birim)?",
     re.IGNORECASE,
 )
 
@@ -56,19 +60,24 @@ def parse_price(text: str) -> Tuple[Optional[float], str]:
 
     raw = match.group(1)
 
-    # 1.234,56 formatı (Türkçe)
-    if re.match(r"^\d{1,3}(\.\d{3})*,\d{1,2}$", raw):
+    # 1.234,56 formatı (Türkçe — binlik=nokta, ondalık=virgül)
+    if re.match(r"^\d{1,3}(\.\d{3})+,\d+$", raw):
         raw = raw.replace(".", "").replace(",", ".")
-    # 1,234.56 formatı (İngilizce)
-    elif re.match(r"^\d{1,3}(,\d{3})*\.\d{1,2}$", raw):
+    # 1,234.56 formatı (İngilizce — binlik=virgül, ondalık=nokta)
+    elif re.match(r"^\d{1,3}(,\d{3})+\.\d+$", raw):
         raw = raw.replace(",", "")
-    # Sadece virgüllü ondalık: 1234,56
+    # Sadece virgüllü: 1234,56 → ondalık
     elif "," in raw and "." not in raw:
         raw = raw.replace(",", ".")
-    # Sadece noktalı binlik: 1.234 (ondalık değil)
+    # Sadece noktalı: 0.0028 veya 1.5 veya 1234.56 → hepsi ondalık olarak bırak
+    # (binlik nokta kontrolü: sol=0 ise kesinlikle ondalık; sol>0 ve sağ tam 3 hane ise binlik)
+    # Para birimi sembolü ($, €, vb.) varsa kesinlikle ondalık — dönüştürme
     elif "." in raw and "," not in raw:
+        has_currency_symbol = bool(re.search(r"[$€£₺]", text))
         parts = raw.split(".")
-        if len(parts) == 2 and len(parts[1]) == 3:
+        if (not has_currency_symbol
+                and len(parts) == 2 and len(parts[1]) == 3
+                and parts[0] != "0" and int(parts[0]) > 0):
             raw = raw.replace(".", "")
 
     try:
@@ -105,7 +114,8 @@ def parse_stock(text: str) -> Optional[int]:
 
     # Stok var ama miktar belirtilmemiş
     in_stock_patterns = [
-        r"in\s*stock",
+        r"in[-\s]*stock",       # "In Stock", "In-Stock:", "In-Stock: 236,913"
+        r"total\s*stock",       # "Total stock: 1,980,000 parts"
         r"stok\s*(?:var|mevcut|da)",
         r"available",
         r"mevcut",
@@ -114,11 +124,20 @@ def parse_stock(text: str) -> Optional[int]:
         if re.search(pattern, text, re.IGNORECASE):
             # Sayı ara; yoksa -1 (bilinmiyor ama var)
             m = STOCK_REGEX.search(text)
-            return int(m.group(1)) if m else -1
+            return _parse_stock_int(m.group(1)) if m else -1
 
     # Doğrudan sayısal değer
     match = STOCK_REGEX.search(text)
     if match:
-        return int(match.group(1))
+        return _parse_stock_int(match.group(1))
 
     return None
+
+
+def _parse_stock_int(raw: str) -> int:
+    """Virgül/nokta ayırıcılı stok sayısını int'e çevirir. Örn: '1,980,000' → 1980000"""
+    cleaned = re.sub(r"[,.]", "", raw)
+    try:
+        return int(cleaned)
+    except ValueError:
+        return int(re.sub(r"\D", "", raw) or "0")

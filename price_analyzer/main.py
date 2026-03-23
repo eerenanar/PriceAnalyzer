@@ -5,11 +5,13 @@ import logging
 import os
 import sys
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from threading import Lock
 from typing import Dict, List
 
 from .config import load_config
-from .excel_reader import read_product_codes
+from .excel_reader import read_products_with_offers
 from .report import build_report
 from .scraper import PriceResult, Scraper, SeleniumScraper, load_sites
 
@@ -40,6 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sites", help="Site listesi TXT dosyası (config.ini'yi geçersiz kılar)")
     parser.add_argument("--output", help="Çıktı klasörü (config.ini'yi geçersiz kılar)")
     parser.add_argument("--filter", dest="filter_codes", help="Virgülle ayrılmış ürün kodları filtresi")
+    parser.add_argument("--filter-sites", dest="filter_sites", help="Virgülle ayrılmış site adları filtresi (ör. Digikey,Arrow)")
     return parser.parse_args()
 
 
@@ -65,9 +68,9 @@ def main() -> None:
     logger.info(f"Çıktı klasörü: {cfg.files.output_dir}")
     logger.info("=" * 60)
 
-    # Ürün kodlarını oku
+    # Ürün kodlarını ve teklif adetlerini oku
     try:
-        product_codes = read_product_codes(cfg.files.products_file, cfg.excel)
+        product_codes, offer_quantities = read_products_with_offers(cfg.files.products_file, cfg.excel)
     except Exception as e:
         logger.critical(f"Ürün dosyası okunamadı: {e}")
         sys.exit(1)
@@ -76,6 +79,7 @@ def main() -> None:
     if args.filter_codes:
         filter_set = {c.strip() for c in args.filter_codes.split(",")}
         product_codes = [c for c in product_codes if c in filter_set]
+        offer_quantities = {k: v for k, v in offer_quantities.items() if k in filter_set}
         logger.info(f"Filtre uygulandı – {len(product_codes)} ürün seçildi")
 
     if not product_codes:
@@ -93,36 +97,75 @@ def main() -> None:
         logger.critical("Hiç site yapılandırması bulunamadı. sites.txt dosyasını kontrol edin.")
         sys.exit(1)
 
-    # Scraper oluştur
-    scraper_cls = SeleniumScraper if cfg.scraper.use_selenium else Scraper
-    scraper = scraper_cls(cfg.scraper)
+    # Site filtresi
+    if args.filter_sites:
+        filter_site_set = {s.strip().lower() for s in args.filter_sites.split(",")}
+        sites = [s for s in sites if s.name.lower() in filter_site_set]
+        logger.info(f"Site filtresi uygulandı – {[s.name for s in sites]} taranacak")
 
-    # Scraping işlemi
+    # Her site için ayrı bir scraper oluştur (paralel tarama)
+    def make_scraper():
+        scraper_cls = SeleniumScraper if cfg.scraper.use_selenium else Scraper
+        return scraper_cls(cfg.scraper)
+
+    logger.info(f"{len(sites)} site paralel olarak taranacak, her biri {len(product_codes)} ürün işleyecek")
+
+    # Scraping işlemi – her site kendi worker thread'inde çalışır
     all_results: Dict[str, List[PriceResult]] = defaultdict(list)
+    results_lock = Lock()
     total = len(product_codes) * len(sites)
     done = 0
+    done_lock = Lock()
 
-    try:
-        for product_code in product_codes:
-            logger.info(f"── Ürün: {product_code} ({len(sites)} site taranacak)")
-            for site in sites:
+    def scrape_site(site):
+        """Bir sitenin tüm ürünlerini sırayla tarar."""
+        scraper = make_scraper()
+        site_results = []
+        try:
+            for product_code in product_codes:
                 scraped_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 result = scraper.scrape_product(product_code, site, scraped_at)
-                all_results[product_code].append(result)
-                done += 1
+                site_results.append((product_code, result))
+
+                nonlocal done
+                with done_lock:
+                    done += 1
+                    current = done
 
                 status_icon = "✓" if result.status == "OK" else "✗"
-                price_str = f"{result.price:.2f} {result.currency}" if result.price else "-"
+                price_str = f"{result.price:.5f} {result.currency}" if result.price else "-"
                 logger.info(
-                    f"  [{done}/{total}] {status_icon} {site.name:20s} | "
+                    f"  [{current}/{total}] {status_icon} {site.name:20s} | "
                     f"Fiyat: {price_str:15s} | Stok: {result.stock} | Durum: {result.status}"
                 )
+        finally:
+            if hasattr(scraper, "close"):
+                scraper.close()
+        return site_results
+
+    scrapers_to_close = []
+    try:
+        with ThreadPoolExecutor(max_workers=len(sites)) as executor:
+            futures = {executor.submit(scrape_site, site): site for site in sites}
+            for future in as_completed(futures):
+                site = futures[future]
+                try:
+                    site_results = future.result()
+                    with results_lock:
+                        for product_code, result in site_results:
+                            all_results[product_code].append(result)
+                except Exception as e:
+                    logger.error(f"{site.name} tarama hatası: {e}")
     finally:
-        if cfg.scraper.use_selenium and hasattr(scraper, "close"):
-            scraper.close()
+        pass  # Her scraper kendi finally bloğunda kapatılıyor
+
+    # Özet raporunda site sırası sites.txt ile aynı olsun
+    site_order = {site.name: i for i, site in enumerate(sites)}
+    for code in all_results:
+        all_results[code].sort(key=lambda r: site_order.get(r.site_name, 999))
 
     # Rapor oluştur
-    output_path = build_report(dict(all_results), cfg.files.output_dir)
+    output_path = build_report(dict(all_results), cfg.files.output_dir, offer_quantities, cfg.files.products_file)
 
     logger.info("=" * 60)
     logger.info(f"Tamamlandı! Rapor: {output_path}")
