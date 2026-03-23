@@ -1,0 +1,41 @@
+# PriceAnalyzer – Site Yapılandırma Dosyası
+#
+# Format (pipe | ile ayrılmış 4 alan):
+#   SiteAdı | AramaURLŞablonu | FiyatCSSSeçici | StokCSSSeçici
+#
+# Kurallar:
+#   - {code} yer tutucusu ürün koduyla değiştirilir
+#   - # ile başlayan satırlar yorum satırıdır
+#   - Boş satırlar atlanır
+#   - CSS seçiciler, BeautifulSoup'un select_one() metoduyla kullanılır
+#
+# ──────────────────────────────────────────────────────────────────
+# Örnek Yapılandırmalar (Kendi sitelerinize göre düzenleyin)
+# ──────────────────────────────────────────────────────────────────
+
+# Örnek 1: Basit arama sayfası
+# Tedarikci1 | https://www.tedarikci1.com/ara?q={code} | .price | .stock-status
+
+# Örnek 2: Doğrudan ürün sayfası
+# Tedarikci2 | https://www.tedarikci2.com/product/{code} | #product-price | #availability
+
+# Örnek 3: Birden fazla seçici (virgülle ayrılmış – ilk bulunan kullanılır)
+# Tedarikci3 | https://www.tedarikci3.com/search/{code} | span.price,div.fiyat | span.stok,div.stock
+
+# ──────────────────────────────────────────────────────────────────
+# Aktif site yapılandırmalarınızı buraya ekleyin:
+# ──────────────────────────────────────────────────────────────────
+
+# SiteAdı | URL Şablonu                                    | Fiyat Seçici       | Stok Seçici
+
+Digikey      | https://www.digikey.com/en/products/result?keywords={code}                                                                                         | table.tss-css-18qyn75-table tbody tr:first-child td:nth-child(2)             | div.tss-css-iue0qg-title span                                                | table.tss-css-18qyn75-table tr
+Newark       | https://www.newark.com/search?st={code}                                                                                                            | span[class*='PriceBreakupTableCellstyles__Price-'][class*='MainPrice-']      | div[class*='AvailabilityPrimaryStatusstyles__StatusMessage-']                | div[class*='PriceBreakupTableCellstyles__PriceBreak-']
+Arrow        | https://www.arrow.com/en/search-result.html?keyword={code}&currPage=1                                                                             | p[class*='MuiTypography-poster'][class*='font-color-default']                | p[class*='MuiTypography-poster'][class*='font-weight-']                       | div.css-8hkf9j
+CoreStaff    | https://www.zaikostore.com/zaikostore/en/stockList?stockSearchNew=1&headerSearch=1&productName_forFind={code}&typeStock_forFind=all&viewCount=50&pageNumber=1 | -                                                                            | -
+Rutronik     | https://www.rutronik24.com/search-result/qs:{code}/reset:0                                                                                                | -                                                                            | -
+TTL          | https://www.tti.com/content/ttiinc/en/apps/part-search.html?q={code}&is=true                                                                             | -                                                                            | -
+Maritex      | https://www.maritex.eu/en/search?phrase={code}                                                                                                            | -                                                                            | -
+
+# Aşağıdaki siteler bot koruması nedeniyle erişilemiyor:
+# Mouser TR        | https://www.mouser.com.tr/Search/Refine?Keyword={code} — bot engeli (boş sayfa)
+# OnlineComponents | https://www.onlinecomponents.com/en/search/?q={code} — Incapsula 403
