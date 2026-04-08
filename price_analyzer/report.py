@@ -57,6 +57,117 @@ def _find_cheapest(results: List[PriceResult], qty: int = 1) -> Optional[PriceRe
 
 
 
+def _has_multiple_offers(offer_quantities: Dict[str, Tuple[int, int]]) -> bool:
+    """İkinci teklif sütununda en az bir değer varsa True döndürür."""
+    for _, (_, qty2) in offer_quantities.items():
+        if qty2 > 0:
+            return True
+    return False
+
+
+def _build_single_offer_report(
+    all_results: Dict[str, List[PriceResult]],
+    output_dir: str,
+    offer_quantities: Dict[str, Tuple[int, int]],
+    input_file: str,
+) -> str:
+    """Tek teklif sütunu olan dosyalar için basit rapor formatı."""
+    from openpyxl.styles import Border, Side
+
+    os.makedirs(output_dir, exist_ok=True)
+    base_name = os.path.splitext(os.path.basename(input_file))[0] if input_file else "output"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_path = os.path.join(output_dir, f"{base_name}_{timestamp}.xlsx")
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+
+    # Site sayısına göre sheet adı
+    site_names = set()
+    for results in all_results.values():
+        for r in results:
+            site_names.add(r.site_name)
+    ws.title = f"{', '.join(sorted(site_names))} Sonuçları" if len(site_names) <= 3 else "Sonuçlar"
+    ws.title = ws.title[:31]  # Excel sheet adı max 31 karakter
+
+    thin_border = Border(
+        left=Side(style='thin'), right=Side(style='thin'),
+        top=Side(style='thin'), bottom=Side(style='thin')
+    )
+
+    headers = [
+        "Ürün Kodu", "Adet", "Birim Fiyat", "Adet Fiyatı",
+        "Toplam Maliyet", "Para Birimi", "Stok", "Kaynak Site",
+        "Durum", "URL", "Tarama Tarihi",
+    ]
+
+    # Header stili
+    for col, header in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col, value=header)
+        _apply_header_style(cell)
+        cell.border = thin_border
+
+    row_idx = 2
+    for product_code, results in all_results.items():
+        qty1, _ = offer_quantities.get(product_code, (0, 0))
+        cheapest = _find_cheapest(results, qty=qty1 if qty1 > 0 else 1)
+
+        if cheapest:
+            unit_price_1 = cheapest.price_for_qty(1) if cheapest.price is not None else None
+            qty_price = cheapest.price_for_qty(qty1) if cheapest.price is not None and qty1 > 0 else unit_price_1
+            total = round(qty_price * qty1, 2) if qty_price and qty1 > 0 else None
+            stock_display = (
+                "Stok Yok" if cheapest.stock == 0
+                else ("Sipariş Üzerine" if cheapest.stock == -1
+                      else (str(cheapest.stock) if cheapest.stock is not None else "-"))
+            )
+            row_data = [
+                product_code, qty1 if qty1 > 0 else "-",
+                unit_price_1, qty_price, total,
+                cheapest.currency, stock_display, cheapest.site_name,
+                cheapest.status, cheapest.url, cheapest.scraped_at,
+            ]
+            is_ok = True
+        else:
+            # En iyi sonuç yok - ilk sonucu al (durum bilgisi için)
+            first = results[0] if results else None
+            status = first.status if first else "NOT_FOUND"
+            row_data = [
+                product_code, qty1 if qty1 > 0 else "-",
+                None, None, None,
+                "", "-", "", status, "", "",
+            ]
+            is_ok = False
+
+        for col, val in enumerate(row_data, 1):
+            cell = ws.cell(row=row_idx, column=col, value=val)
+            cell.border = thin_border
+            if is_ok:
+                cell.fill = PatternFill(fill_type="solid", fgColor=COLOR_CHEAPEST)
+            else:
+                cell.fill = PatternFill(fill_type="solid", fgColor=COLOR_ERROR)
+
+        # Fiyat formatı
+        for col in [3, 4, 5]:
+            cell = ws.cell(row=row_idx, column=col)
+            if isinstance(cell.value, (int, float)):
+                cell.number_format = '#,##0.00000'
+
+        row_idx += 1
+
+    # Sütun genişlikleri
+    widths = [25, 10, 18, 18, 20, 12, 18, 15, 15, 60, 20]
+    for i, w in enumerate(widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{row_idx - 1}"
+    ws.freeze_panes = "A2"
+
+    wb.save(output_path)
+    logger.info(f"Rapor oluşturuldu: {output_path}")
+    return output_path
+
+
 def build_report(
     all_results: Dict[str, List[PriceResult]],
     output_dir: str,
@@ -65,6 +176,7 @@ def build_report(
 ) -> str:
     """
     Tüm ürünler için Excel raporu oluşturur.
+    Tek teklif sütunu varsa basit format, birden fazla varsa detaylı format kullanır.
 
     Args:
         all_results: {ürün_kodu: [PriceResult, ...]} sözlüğü
@@ -77,6 +189,10 @@ def build_report(
     """
     if offer_quantities is None:
         offer_quantities = {}
+
+    # Tek teklif mi çoklu teklif mi?
+    if not _has_multiple_offers(offer_quantities):
+        return _build_single_offer_report(all_results, output_dir, offer_quantities, input_file)
 
     os.makedirs(output_dir, exist_ok=True)
     base_name = os.path.splitext(os.path.basename(input_file))[0] if input_file else "output"

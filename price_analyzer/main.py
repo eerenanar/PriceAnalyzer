@@ -159,6 +159,45 @@ def main() -> None:
     finally:
         pass  # Her scraper kendi finally bloğunda kapatılıyor
 
+    # NOT_FOUND olanları tekrar dene (arama sayfası redirect gecikmesi veya rate limit nedeniyle)
+    retry_items = []
+    for product_code, results_list in all_results.items():
+        for i, result in enumerate(results_list):
+            if result.status == "NOT_FOUND":
+                site_match = [s for s in sites if s.name == result.site_name]
+                if site_match:
+                    retry_items.append((product_code, i, site_match[0]))
+
+    if retry_items:
+        logger.info(f"{len(retry_items)} NOT_FOUND ürün tekrar taranıyor (yeni session ile)...")
+        # Her retry turunda yeni session oluştur (stale session sorununu önler)
+        for retry_round in range(1, 3):  # 2 retry turu
+            if not retry_items:
+                break
+            logger.info(f"  Retry turu {retry_round}: {len(retry_items)} ürün")
+            retry_scraper = make_scraper()  # Her turda yeni session
+            still_failed = []
+            try:
+                for product_code, idx, site in retry_items:
+                    import time as _time
+                    _time.sleep(2)  # Rate limit koruması için daha uzun bekleme
+                    scraped_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    new_result = retry_scraper.scrape_product(product_code, site, scraped_at)
+                    if new_result.status == "OK":
+                        all_results[product_code][idx] = new_result
+                        logger.info(
+                            f"  [RETRY-{retry_round}] ✓ {site.name:20s} | {product_code} | "
+                            f"Fiyat: {new_result.price:.5f} {new_result.currency} | Stok: {new_result.stock}"
+                        )
+                        with done_lock:
+                            done += 1
+                    else:
+                        still_failed.append((product_code, idx, site))
+            finally:
+                if hasattr(retry_scraper, "close"):
+                    retry_scraper.close()
+            retry_items = still_failed
+
     # Özet raporunda site sırası sites.txt ile aynı olsun
     site_order = {site.name: i for i, site in enumerate(sites)}
     for code in all_results:

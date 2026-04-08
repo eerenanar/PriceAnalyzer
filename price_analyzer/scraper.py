@@ -6,8 +6,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+import urllib3
+import requests
 import cloudscraper
+from curl_cffi import requests as curl_requests
 from bs4 import BeautifulSoup
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from .config import ScraperConfig
 from .parser import parse_price, parse_stock
@@ -105,7 +110,7 @@ class Scraper:
 
     def __init__(self, cfg: ScraperConfig):
         self.cfg = cfg
-        self.session = cloudscraper.create_scraper()
+        self.session = curl_requests.Session(impersonate='chrome', verify=False)
         self.session.headers.update(self.HEADERS)
 
     def _fetch(self, url: str) -> Optional[str]:
@@ -335,6 +340,99 @@ class Scraper:
         breaks.sort(key=lambda x: x[0])
         return breaks, currency
 
+    def _extract_digikey_data(self, html: str) -> Tuple[List[Tuple[int, float]], str, Optional[int]]:
+        """Digikey ürün sayfasından Cut Tape fiyat kırılımlarını ve stok bilgisini çıkarır.
+        Sadece 'Cut Tape (CT) & Digi-Reel®' grubundaki tabloyu kullanır.
+        Fallback olarak Bulk tablosunu kullanır.
+        Returns (breaks, currency, stock)
+        """
+        soup = BeautifulSoup(html, "lxml")
+        breaks: List[Tuple[int, float]] = []
+        currency = "USD"
+        stock: Optional[int] = None
+
+        # Stok bilgisi
+        title_msgs = soup.find(attrs={"data-testid": "title-messages"})
+        if title_msgs:
+            text = title_msgs.get_text(strip=True)
+            stock_match = re.search(r"In-Stock:\s*([\d,]+)", text)
+            if stock_match:
+                stock = int(stock_match.group(1).replace(",", ""))
+            elif "Available To Order" in text:
+                stock = -1  # sipariş üzerine
+            elif "Out of Stock" in text:
+                stock = 0
+            elif "Obsolete" in text:
+                stock = 0
+            elif "Manufacturer Quote Required" in text or "Quote Required" in text:
+                stock = -2  # teklif gerekli
+
+        # Fiyat: pricing-group span'larından Cut Tape tablosunu bul
+        pricing_container = soup.find(attrs={"data-testid": "pricing-table-container"})
+        if not pricing_container:
+            return breaks, currency, stock
+
+        pricing_groups = pricing_container.find_all(attrs={"data-testid": "pricing-group"})
+
+        ct_table = None
+        bulk_table = None
+
+        for group in pricing_groups:
+            group_text = group.get_text()
+            table = group.find("table")
+            if not table:
+                continue
+            if "Cut Tape" in group_text or "Digi-Reel" in group_text:
+                ct_table = table
+                break
+            elif "Bulk" in group_text and bulk_table is None:
+                bulk_table = table
+
+        target_table = ct_table or bulk_table
+        if not target_table:
+            # Fallback: container'daki ilk tablo
+            target_table = pricing_container.find("table")
+
+        if target_table:
+            tbody = target_table.find("tbody")
+            if tbody:
+                for row in tbody.find_all("tr"):
+                    cells = row.find_all("td")
+                    if len(cells) < 2:
+                        continue
+                    qty_text = cells[0].get_text(strip=True)
+                    price_text = cells[1].get_text(strip=True)
+
+                    qty_match = re.search(r"[\d,]+", qty_text)
+                    if not qty_match:
+                        continue
+                    try:
+                        min_qty = int(qty_match.group().replace(",", ""))
+                    except ValueError:
+                        continue
+
+                    price_match = re.search(r"\$?([\d,]+\.?\d*)", price_text)
+                    if not price_match:
+                        continue
+                    try:
+                        price_val = float(price_match.group(1).replace(",", ""))
+                    except ValueError:
+                        continue
+
+                    if price_val > 0:
+                        breaks.append((min_qty, price_val))
+
+        breaks.sort(key=lambda x: x[0])
+
+        # Para birimi
+        currency_div = pricing_container.find(attrs={"data-testid": "prices-in-currency-div"})
+        if currency_div:
+            cur_match = re.search(r"\b(USD|EUR|GBP|TRY)\b", currency_div.get_text())
+            if cur_match:
+                currency = cur_match.group(1)
+
+        return breaks, currency, stock
+
     def scrape_product(self, product_code: str, site: SiteConfig, scraped_at: str) -> PriceResult:
         """
         Belirli bir sitede ürün kodunu arar ve sonucu döndürür.
@@ -355,6 +453,71 @@ class Scraper:
                 status="TIMEOUT",
                 scraped_at=scraped_at,
             )
+
+        # Digikey: özel parser ile Cut Tape fiyatlarını ve stok bilgisini al
+        if "digikey.com" in url:
+            dk_breaks, dk_currency, dk_stock = self._extract_digikey_data(html)
+
+            # Arama sonuç sayfasındaysa (pricing container yok) → ilk ürün linkini takip et
+            if not dk_breaks and dk_stock is None:
+                soup_tmp = BeautifulSoup(html, "lxml")
+                product_link = soup_tmp.select_one('a[href*="/products/detail/"]')
+                if product_link:
+                    product_url = product_link["href"]
+                    if not product_url.startswith("http"):
+                        product_url = "https://www.digikey.com" + product_url
+                    logger.debug(f"Digikey: ürün sayfasına yönlendiriliyor → {product_url}")
+                    product_html = self._fetch(product_url)
+                    if product_html:
+                        html = product_html
+                        url = product_url
+                        dk_breaks, dk_currency, dk_stock = self._extract_digikey_data(html)
+
+            # Son çare: Digikey API benzeri keyword endpoint'ini dene
+            if not dk_breaks and dk_stock is None:
+                alt_url = f"https://www.digikey.com/en/products/result?keywords={product_code}&ColumnSort=0&page=1&pageSize=25"
+                logger.debug(f"Digikey: alternatif arama URL deneniyor → {alt_url}")
+                time.sleep(1)  # Rate limit koruması
+                alt_html = self._fetch(alt_url)
+                if alt_html:
+                    soup_alt = BeautifulSoup(alt_html, "lxml")
+                    # Arama sonuçlarındaki tüm ürün linklerini kontrol et
+                    detail_links = soup_alt.select('a[href*="/products/detail/"]')
+                    for link in detail_links[:3]:  # İlk 3 sonucu dene
+                        detail_url = link["href"]
+                        if not detail_url.startswith("http"):
+                            detail_url = "https://www.digikey.com" + detail_url
+                        detail_html = self._fetch(detail_url)
+                        if detail_html:
+                            dk_breaks, dk_currency, dk_stock = self._extract_digikey_data(detail_html)
+                            if dk_breaks:
+                                html = detail_html
+                                url = detail_url
+                                break
+
+            if dk_breaks:
+                return PriceResult(
+                    site_name=site.name,
+                    product_code=product_code,
+                    price=dk_breaks[0][1],
+                    currency=dk_currency,
+                    stock=dk_stock,
+                    url=url,
+                    status="OK",
+                    scraped_at=scraped_at,
+                    price_breaks=dk_breaks,
+                )
+            else:
+                return PriceResult(
+                    site_name=site.name,
+                    product_code=product_code,
+                    price=None,
+                    currency=dk_currency,
+                    stock=dk_stock,
+                    url=url,
+                    status="NOT_FOUND" if dk_stock is None else "NO_PRICE",
+                    scraped_at=scraped_at,
+                )
 
         # Rutronik: stok arama sayfasından, fiyat kırılımları ürün sayfasından alınır
         rutronik_search_html = None
